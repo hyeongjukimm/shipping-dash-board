@@ -1,0 +1,88 @@
+name: 해운·물류 지표 자동 수집 · 대시보드 자동 배포
+
+# 1) 해진공(KOBC) KDCI·KCCI는 requests만으로 수집되므로 매일 GitHub Actions에서
+#    대신 돌려 inbox/에 커밋해둔다.
+# 2) 그 직후 run_monitor.py를 그대로 실행해 대시보드 HTML 2종을 만들고
+#    GitHub Pages로 자동 배포한다 — 사용자는 파일을 내려받지 않고 링크만 보면 된다.
+#
+# ※ 한계: 블룸버그 터미널은 로컬 PC 라이선스라 클라우드에서 돌릴 수 없다.
+#   이 워크플로우는 inbox/ 에 "커밋되어 있는" bbg_*.xlsx(있다면)만 사용한다.
+#   즉 평소처럼 로컬에서 Refresh All → inbox/에 저장 후,
+#     git add inbox/bbg_YYYYMMDD.xlsx && git commit -m "bbg 갱신" && git push
+#   로 그 파일을 저장소에 올려줘야 다음 야간 배포부터 블룸버그 수치까지 반영된다.
+#   올리지 않으면 센터DB·NOAA·FAO 기준 데이터 + 해진공 KDCI·KCCI만 반영된 채로 배포된다.
+#   (사내 Bloomberg 데이터를 리포지토리에 두는 것 자체가 부담되면 이 단계는 생략하고
+#    평소처럼 로컬에서 python run_monitor.py 로 내부 검토용을 보는 것도 가능하다.)
+
+on:
+  schedule:
+    # 21:30 UTC = 06:30 KST (평일). 전날 KDCI(일별) 확정치 + 직전 주 KCCI(주간) 반영 시각.
+    - cron: '30 21 * * 1-5'
+  workflow_dispatch: {}   # 필요할 때 Actions 탭에서 수동 실행도 가능
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  collect-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 설치
+        run: pip install requests pandas lxml openpyxl
+
+      - name: 해진공 KDCI·KCCI 수집
+        run: python collect_kobc.py --out inbox
+
+      - name: 변경사항 커밋 (해진공 CSV)
+        run: |
+          git config user.name "kobc-bot"
+          git config user.email "kobc-bot@users.noreply.github.com"
+          git add inbox/kobc_kdci.csv inbox/kobc_kcci.csv
+          git diff --cached --quiet || git commit -m "chore: KOBC KDCI/KCCI 자동 갱신 $(date -u +%F)"
+
+      - name: 대시보드 빌드
+        run: python run_monitor.py --no-open
+
+      - name: 랜딩 페이지 생성
+        run: |
+          cat > output/index.html << 'HTML'
+          <!doctype html><meta charset="utf-8">
+          <title>해운·물류 지표 모니터</title>
+          <body style="font-family:sans-serif;max-width:640px;margin:60px auto;line-height:1.8">
+          <h2>해운·물류 지표 모니터</h2>
+          <p><a href="dashboard_내부검토용.html">내부 검토용</a></p>
+          <p><a href="dashboard_외부공표용.html">외부 공표용</a></p>
+          <p style="color:#888;font-size:13px">매일 06:30(KST) 해진공 자동 수집 후 재생성됩니다.</p>
+          </body>
+          HTML
+
+      - name: Pages 아티팩트 업로드
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: output
+
+      - name: 저장소에 푸시 (해진공 CSV 커밋분)
+        run: git push
+
+  deploy:
+    needs: collect-and-build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: GitHub Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@v4
